@@ -1,0 +1,43 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "vera-memory",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-09-18",
+  "compatibility_flags": [
+    "nodejs_compat",
+    "global_fetch_strictly_public"
+  ],
+  "workers_dev": true,
+  "preview_urls": false,
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": true
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "memory-db",
+      "database_id": "94e8bf24-53d1-4199-8483-e908c10c571b",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "kv_namespaces": [
+    {
+      "binding": "OAUTH_KV",
+      "id": "df8e5ecacb6a4d4397d4dbb885c4b145"
+    }
+  ],
+  "vars": {
+    "APP_ORIGIN": "http://localhost:8791"
+  },
+  "routes": [],
+  "triggers": {
+    "crons": [
+      "23 3 * * *"
+    ]
+  },
+  "observability": {
+    "enabled": false
+  }
+}

@@ -1,0 +1,11 @@
+import assert from 'node:assert/strict';
+import {readFile,writeFile} from 'node:fs/promises';
+const base=process.env.MEMORY_BASE_URL??'https://memory.r-vera.com';
+const path=process.argv[2]??'artifacts/acceptance-production.json';
+const report=JSON.parse(await readFile(path,'utf8'));
+const r=await fetch(base+'/login',{method:'POST',redirect:'manual',headers:{origin:base,'content-type':'application/x-www-form-urlencoded'},body:new URLSearchParams({username:process.env.MEMORY_USERNAME,password:process.env.MEMORY_PASSWORD})});assert.equal(r.status,303);
+const cookie=r.headers.get('set-cookie').split(';')[0];
+const get=async id=>{const r=await fetch(base+'/api/memories/'+id,{headers:{cookie}});assert.equal(r.status,200);return r.json();};
+const old=await get(report.ids.old),current=await get(report.ids.current);assert.equal(old.active,0);assert.equal(current.active,1);assert.equal(current.supersedes,old.id);assert.ok(old.body.includes(report.run));assert.ok(current.body.includes(report.run));assert.equal(current.versions.length,2);
+await fetch(base+'/logout',{method:'POST',redirect:'manual',headers:{cookie,origin:base}});
+report.checks.push('production redeployment preserves both originals and correction chain');report.persistence_verified_at=new Date().toISOString();await writeFile(path,JSON.stringify(report,null,2));console.log('PASS production redeployment preserves both originals and correction chain');

@@ -1,0 +1,7 @@
+# Copy to .dev.vars; replace with a locally generated random secret (>=32 chars).
+SESSION_SECRET=replace-with-a-random-local-secret-at-least-32-characters
+APP_ORIGIN=http://localhost:8791
+# Optional OpenAI-compatible embeddings endpoint. No chat model is used.
+# EMBEDDING_URL=https://your-trusted-provider.example/v1/embeddings
+# EMBEDDING_MODEL=your-embedding-model
+# EMBEDDING_API_KEY=server-only-secret

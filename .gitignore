@@ -7,3 +7,16 @@ __pycache__/
 *.pyc
 .venv/
 .DS_Store
+
+node_modules/
+.wrangler/
+.dev.vars*
+dist/
+artifacts/
+playwright-report/
+test-results/
+*.log
+secrets*.json
+backup*.sql
+
+!.dev.vars.example

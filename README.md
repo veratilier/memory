@@ -1,95 +1,83 @@
-# Memory · 记忆工具原型
+# Memory · 有迹可循的记忆库
 
-这是独立的本地源码原型，不是完整 P0、不是线上部署，也没有连接 ChatGPT、Atlas、Archive 或 Vesper。界面中的样本全部是明确标注的虚构资料；没有附带私人聊天或任何密钥。
+为 Rowan / Vesper 原来的聊天提供记忆工具，不是另一个聊天窗口。默认无需生成模型、API Key 或嵌入模型。
 
-## 项目方向
+- 管理页面：**https://memory.r-vera.com/**（登录后访问）
+- Streamable HTTP MCP：**https://memory.r-vera.com/mcp**（OAuth 或受限服务令牌）
+- 页面与 MCP 共用独立 Cloudflare D1 `memory-db`；OAuth 使用独立 KV。不读取 Atlas / Archive 的私人记录。
+- 已完成的线上和本地验收见 [验收记录](docs/acceptance.md)，连接说明见 [连接现有聊天](docs/connecting.md)。
 
-目标是供现有聊天助手或 Vesper 调用的记忆工具：保存、检索原文与纠正旧版本，不要求配置聊天生成模型。嵌入模型是可选检索组件，默认关键词检索即可运行。
+## 功能
 
-当前提交保存已有检索核心和测试；MCP 协议入口尚未实现，也没有可连接的 MCP URL。网页与生成模型适配器仅用于可选调试。下一步将核心包装为 MCP 工具；每轮自动检索仍需由宿主聊天流程接入。
+清冷、紧凑、手机适配的列表管理页：查看、搜索、新增、纠正，展示完整原文、来源说明/链接、发生时间、记录时间、来源标识及版本关系。没有聊天输入窗口或生成模型配置。
 
-## 先跑起来（不需要 API Key）
+| MCP 工具 | 用途 |
+| --- | --- |
+| `memory_save` | 原样保存正文、来源、明确的类型；可提供稳定 `source_id` |
+| `memory_search` | 返回原文、来源、时间、版本、命中词/依据；无匹配返回 `status: no_match` |
+| `memory_get` | 按 ID 回查那一版原文及完整版本关系，不偷偷换成新版 |
+| `memory_correct` | 以当前 ID 创建纠正版本，必须提供纠正原因，保留旧原文 |
 
-需要 Python 3.11+（含 sqlite3 模块）。Mac、Linux、Windows 都可运行：
+默认检索排除已替代版本、梦和感受。类型包括 `episode / preference / agreement / reflection / dream`；梦和感受即使被显式搜索，也会标记为 `subjective_not_fact`。经历属于**有来源的记录，未经外部核验**，工具不会自行断言为客观事实，也无法自动识别被错误标成经历的梦境。
+
+## 原文、去重与纠正
+
+- 正文不裁剪、不改写；最多12,000字符。发生时间未知则留空，有值必须使用带时区 ISO 8601。
+- 显式 `source_id` 相同、内容相同返回同一 ID；内容不同返回冲突。省略时按正文、来源、类型、时间和纠正关系生成内容哈希，重复保存仍去重。
+- 纠正以单个数据库事务写入原文和索引，由唯一约束及触发器保证一个旧版本最多有一个后继。并发或迟到纠正返回 `stale_version`，要求先读取最新版。
+- 原文只代表录入者提供的片段，来源链接不会自动抓取或验证。没有导入私人聊天，也没有自动摘要、自动收集或删除工具。
+
+## 检索机制
+
+默认中文双字词 + 英文单词倒排索引，覆盖正文和来源说明，大小写归一。按命中词比例排序，阈值0.18；返回最多20条。查询最多使用80个词元，截断会明确提示。它是词面检索，不是理解式推理，不保证召回所有措辞不同的旧事。
+
+固定偏好和约定也需要与查询匹配，不会用固定偏好填充“已命中”的假象。原文长度和命中条数受限，但**不截断命中记录的原文**；宿主应按自己的上下文预算选择条目。
+
+可选语义增强：设置服务端 `EMBEDDING_URL`、`EMBEDDING_MODEL`，需要时加密设置 `EMBEDDING_API_KEY`。接口为 OpenAI-compatible `POST {model,input}`，读取 `data[0].embedding`，只允许配置好的 HTTPS 服务。没有任何聊天生成模型调用。
+
+向量缓存按端点+模型区分，增强覆盖最近200条合格记录，每轮最多补12条缓存，总增强时间限制约10秒。向量阈值0.65为试验值，需按实际模型评估；缓存不完整、范围限制和故障均返回 `warnings`。失败退回完整关键词检索，不伪称没有相关记忆。启用外部嵌入会把查询和待嵌入的原文发送给该配置服务；默认关闭。
+
+## 安全与鉴权
+
+沿用 [Atlas](https://github.com/veratilier/Atlas) / [Archive](https://github.com/veratilier/Archive) 的已验证架构：Cloudflare OAuth Provider + 官方 MCP SDK Web Standard Streamable HTTP transport。代码独立，cookie、数据库和密钥均隔离。
+
+- OAuth Authorization Code + **PKCE S256**；DCR 和 CIMD；资源绑定、短期 access token、refresh rotation、授权撤销。
+- `memory:read` / `memory:write` 分别检查。网页“连接与权限”可查看/撤销 OAuth 授权，生成90天服务令牌（可选择只读）。服务令牌只存哈希，明文仅展示一次。
+- 管理页面需登录；口令为加盐 PBKDF2-SHA256（100,000轮，沿用 Workers 兼容实现）。登录节流，Secure / HttpOnly / SameSite=Lax 主机 cookie，服务端会话可撤销。
+- 修改密码使全部网页会话、服务令牌和现有 OAuth access token 失效，客户端必须重新授权。
+- 同源写入检查、绑定授权请求的 CSRF、严格 CSP、输入限制。API/MCP 响应不缓存，生产请求日志关闭，不记录正文或凭证。
+- 当前为**单一所有者的一份共享记忆库**，Rowan/Vesper 是该所有者授权的客户端。不是开放注册、多租户产品。
+
+## 本地开发和测试
+
+Node.js 24+。生产入口是 `src/worker.ts`，不是 Python 开发服务器。
 
 ```sh
-cd memory
-python3 app.py
+npm ci
+cp .dev.vars.example .dev.vars
+# 替换 SESSION_SECRET 为本地随机值
+npm run db:local
+# 通过环境安全提供用户名/密码，生成私有初始化 SQL
+node scripts/owner-sql.mjs /private/path/owner.sql
+npx wrangler d1 execute memory-db --local --file /private/path/owner.sql
+npm run dev
 ```
 
-Windows 可用 `py app.py`。浏览器打开 http://127.0.0.1:8787 。点击“加入虚构演示样本”，问“蓝色纸船放在哪里？”，再问“那个呢？”。查看召回卡片和“交给模型的完整上下文”。也可保存自己的测试记录、纠正后再检索。
-
-**无模型模式仅展示检索与上下文，不伪造 AI 回答。** 默认检索采用中文双字词与英文词重合，不是真正的语义向量。每次 `/api/chat` 都在回复之前调用检索，固定偏好与约定另行加入。最近六条消息用于连续对话，短句利用近期用户消息辅助检索。
-
-## 试真正的向量检索和模型回复
-
-已提供 Ollama 的 `/api/embed` 与 `/api/chat` 接口适配器。先另行安装 Ollama，并准备适合设备、支持中文的嵌入模型和聊天模型；本项目不会自动下载大模型。模型选择不等同于把官端 Rowan 搬到本地。
-
-在同一终端设置实际已安装的模型名，然后运行：
+本地页面为 `http://localhost:8791`。用户名/密码通过 `MEMORY_USERNAME` / `MEMORY_PASSWORD` 提供给初始化脚本；不要把真实口令写进命令历史。SQL 文件含口令哈希，使用后删除，禁止提交。
 
 ```sh
-export OLLAMA_URL=http://127.0.0.1:11434
-export EMBED_MODEL=你的已安装嵌入模型名
-export CHAT_MODEL=你的已安装聊天模型名
-python3 app.py
-```
-
-只设置 EMBED_MODEL 也能试真正的向量召回。设置 CHAT_MODEL 后点击“发送并调用已配置模型”，服务才会调用生成模型。界面显示实际检索模式与失败提示。首次向量检索会建立并缓存当前经历的向量；后续读取缓存。修改记忆会创建新版本，默认召回排除旧版。换嵌入模型使用新模型名；同名模型重拉导致维度变化时，需清理该模型缓存重新建立。
-
-模型协议参考：
-- https://docs.ollama.com/api/embed
-- https://docs.ollama.com/api/chat
-
-原文和召回片段会发送到配置的 OLLAMA_URL；默认是本机。若改成其他服务地址，先确认该服务可以接收你的资料。
-
-## 已实现
-
-- SQLite 持久化记忆、来源、可空的发生时间、记录时间、纠正版本。
-- 相同 source_id 相同内容重复导入返回原记录；不同内容报冲突。
-- 每条消息自动检索、上下文装配与调用模型的顺序固定，不依赖模型临时想起去查。
-- 关键词检索；可选真实嵌入与余弦相似度混合召回。
-- 固定偏好/约定最多4条，经历最多6条，总记忆材料约5000字符预算（不是token预算）。
-- 梦与感受保留，但不进入本版事实召回；旧版本可看，不默认召回。
-- 检索轨迹保存在 retrieval_runs，网页显示原文、来源、命中理由和模型输入。
-- 向量服务异常明确降级到关键词；模型失败不写成已生成。
-
-## GitHub 与运行位置
-
-GitHub 适合保存源码、测试和部署配置；它不是长期运行这个服务的地方。源码仓库：https://github.com/veratilier/memory 。
-
-私有数据位于 `data/memory.sqlite3`，包括记忆、聊天和检索轨迹；`.gitignore` 已排除 data、数据库、环境变量文件。上传前确认只选源码，不上传数据库、真实样本或密钥。GitHub Actions 如需配置，应仅运行虚构样本测试，不运行私人聊天服务。
-
-本版为单用户本地实验，服务仅监听 127.0.0.1，并校验 Host 和页面临时令牌。**不要直接将本版 HTTP 服务暴露到公网。** 可先在 Mac 本地试；也能在 VPS 上通过 SSH 端口转发私人访问。正式常驻部署需要生产应用服务器、鉴权、HTTPS、备份与持久数据盘，不必为了存几条记忆专门买 Mac mini。本地大模型的硬件需求另算；将来可替换为你已有的模型后端适配器。
-
-Python 的标准库 HTTP 服务适合此类本地实验，不是生产服务器：
-https://docs.python.org/3/library/http.server.html
-
-## 怎样接进聊天
-
-核心入口是 `Memory.chat(message, conversation, generate=True)`。内部顺序：
-
-1. 读取同一会话近期消息。
-2. 检索相关经历，并加入固定偏好/约定。
-3. 拼出带来源的历史上下文与当前消息。
-4. 将这个 messages 传给配置的聊天模型。
-5. 保存本轮输入、实际生成的回复及召回记录。
-
-自建聊天后端必须把这段流程接入自己的消息入口，才能每轮自动执行。单独上传 GitHub 或提供搜索接口不会自动改变官端每轮上下文。若后续只做 MCP 搜索入口，那是提供检索能力，不等同于这里的强制自动接入。
-
-## 范围与未完成项
-
-- 这是小数据试验，当前按全部有效经历扫描；不适合大量历史直接导入。向量第一次生成也可能较慢。
-- 暂定关键词阈值0.18、向量阈值0.65只是试验值，必须针对实际模型和聊天语料评估。
-- 有固定偏好不代表问题找到了相关经历：看 episode_hits，而不只看 selected 数量。
-- 原文就是手动录入的片段，没有验证它与外部聊天的真实性；目前来源是用户提供的说明。
-- 没有图片上传、媒体原件、聊天批量导入、后台自动摘要、多用户隔离、自动推送、删除接口或MCP。
-- 没有为真实模型做线上质量验证；单元测试使用可控假模型验证接线、缓存、回退与上下文传递。
-- 不能保证从相似度判定事实，不能把该原型称为完整记忆、完整P0或已上线服务。
-
-## 验证
-
-```sh
+npm run check
+npx playwright install chromium
+node scripts/local-acceptance.mjs
 python3 -m unittest discover -s tests -v
 ```
 
-包含自动召回后再调用模型、短句上下文、会话隔离、纠正、去重冲突、梦/感受隔离、向量故障降级、向量缓存、无匹配、模型失败、重启持久化、预算和HTTP流程测试。
+本地验收脚本会自动创建隔离数据库和虚构用户，走真实页面保存、OAuth、官方 MCP SDK、纠正和撤销权限，随后完整停止并重启 Worker 检查持久化。截图和报告位于被忽略的 `artifacts/`。本机已有 Chrome 时可设置 `PLAYWRIGHT_CHROME=1`。Python 的12项测试保留为原型回归检查。
+
+## 部署与维护
+
+详见 [部署说明](docs/deployment.md)。当前复用既有 Cloudflare 账号和 `r-vera.com` 域名，Worker `vera-memory`，数据库 `memory-db`。没有购买新域名，也没有把本地 Python HTTP 服务暴露到公网。
+
+仓库只保存代码、数据库结构和虚构测试。`.dev.vars`、私有初始化 SQL、数据库、备份、密钥和真实聊天不得提交。管理页、MCP 和版本部署不会清空 D1。D1 支持备份导出与恢复；操作前确认目标库，备份放在仓库之外的受保护位置。
+
+本仓库原有 `memory.py`、`app.py`、`static/` 作为仅本地的历史原型保留，**不参与生产构建**；旧 SQLite 数据不会被自动上传或导入。生产页面/API 不提供 `/api/chat`。
