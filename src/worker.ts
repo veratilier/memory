@@ -83,6 +83,8 @@ app.get('/',async c=>await currentUser(c.req.raw,c.env)?c.env.ASSETS.fetch(new R
 app.get('/index.html',async c=>await currentUser(c.req.raw,c.env)?c.env.ASSETS.fetch(c.req.raw):c.redirect('/login'));
 app.get('/style.css',c=>c.env.ASSETS.fetch(c.req.raw));
 app.get('/app.js',c=>c.env.ASSETS.fetch(c.req.raw));
+app.get('/manifest.webmanifest',c=>c.env.ASSETS.fetch(c.req.raw));
+app.get('/icons/:file',c=>c.env.ASSETS.fetch(c.req.raw));
 app.onError((err,c)=>{
  if(err instanceof z.ZodError)return c.json({error:'invalid_arguments',details:err.issues.map(i=>({path:i.path,message:i.message}))},400);
  if(err instanceof MemoryError)return c.json({error:err.code},err.status);
