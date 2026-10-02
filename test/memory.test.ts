@@ -91,3 +91,19 @@ test('metadata and withdrawals retain originals; review waits for a new correcte
  assert.equal((await searchMemory(env,{query:'蓝色纸船'})).hits.length,0);
  assert.equal((await getMemory(env.DB,corrected.id)).withdrawal?.reason,'fixture withdraw');
 });
+
+test('library previews preserve metadata and paginate combined preferences/agreements',async()=>{
+ const details={title:'纸船约定',summary:'只是一条虚构摘要',evidence:[{conversation_id:'fiction',message_id:'m1',quote:'虚构原话'}]};
+ const a=await saveMemory(env.DB,{...fixture,kind:'preference',details});
+ const b=await saveMemory(env.DB,{...fixture,kind:'agreement',source_id:'agreement-preview'});
+ await saveMemory(env.DB,{...fixture,kind:'episode'});
+ const first=await listMemories(env.DB,{offset:0,limit:1,include_superseded:false,kind:'preference_agreement'});
+ const second=await listMemories(env.DB,{offset:1,limit:1,include_superseded:false,kind:'preference_agreement'});
+ assert.equal(first.total,2);assert.equal(second.total,2);assert.notEqual(first.items[0].id,second.items[0].id);
+ const list=[...first.items,...second.items];assert.deepEqual(list.find(r=>r.id===a.id)?.details,{title:details.title,summary:details.summary});
+ assert.ok(list.some(r=>r.id===b.id));
+ const hits=await searchMemory(env,{query:'蓝色纸船',kind:'preference_agreement'});assert.equal(hits.hits.length,2);
+ assert.deepEqual(hits.hits.find(r=>r.id===a.id)?.details,{title:details.title,summary:details.summary});
+ assert.equal('evidence' in (hits.hits.find(r=>r.id===a.id)?.details??{}),false);
+ assert.deepEqual((await getMemory(env.DB,a.id)).details.evidence,details.evidence);
+});
