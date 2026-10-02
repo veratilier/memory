@@ -1,3 +1,4 @@
+import {processVectorJobs} from './memory-vector-index';
 import {OAuthProvider,AuthorizationError} from '@cloudflare/workers-oauth-provider';
 import {Hono} from 'hono';
 import {bodyLimit} from 'hono/body-limit';
@@ -113,12 +114,15 @@ export default {
   try{
    if(url.pathname==='/mcp'){
     const auth=await serviceAuth(request,env);
-    if(auth)return headers(await handleMcp(request,env,auth));
+    if(auth){const response=await handleMcp(request,env,auth);if(response.ok)ctx.waitUntil(processVectorJobs(env).catch(()=>{}));return headers(response);}
    }
-   return headers(await provider(env.APP_ORIGIN).fetch(request,env,ctx));
+   const response=await provider(env.APP_ORIGIN).fetch(request,env,ctx);
+   if(response.ok&&request.method==='POST')ctx.waitUntil(processVectorJobs(env).catch(()=>{}));
+   return headers(response);
   }catch{return headers(Response.json({error:'operation_failed'},{status:500}));}
  },
  async scheduled(_event:ScheduledController,env:Env){
+  await processVectorJobs(env).catch(()=>{});
   await env.DB.batch([env.DB.prepare('DELETE FROM sessions WHERE expires_at<?').bind(Date.now()),env.DB.prepare('DELETE FROM service_tokens WHERE expires_at<?').bind(Date.now()),env.DB.prepare('DELETE FROM login_attempts WHERE window_start<?').bind(Date.now()-86400_000)]);
  },
 } satisfies ExportedHandler<Env>;

@@ -6,6 +6,9 @@ export interface Env {
  ASSETS: Fetcher;
  APP_ORIGIN: string;
  SESSION_SECRET: string;
+ EMBEDDING_ENABLED?: string;
+ EMBEDDING_DIMENSIONS?: string;
+ EMBEDDING_INDEX_VERSION?: string;
  EMBEDDING_URL?: string;
  EMBEDDING_MODEL?: string;
  EMBEDDING_API_KEY?: string;
