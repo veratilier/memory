@@ -20,7 +20,7 @@ export const saveSchema = z.object({
  occurred_at:z.iso.datetime({offset:true}).nullable().optional(),
 }).strict();
 export const correctSchema = saveSchema.extend({id:z.uuid(),correction_reason:z.string().min(1).max(500)}).strict();
-export const searchSchema = z.object({query:z.string().trim().min(1).max(1000),limit:z.number().int().min(1).max(20).default(6),include_superseded:z.boolean().default(false),include_nonfacts:z.boolean().default(false),kind:z.enum(kinds).optional()}).strict();
+export const searchSchema = z.object({query:z.string().trim().min(1).max(1000),limit:z.number().int().min(1).max(20).default(6),include_superseded:z.boolean().default(false),include_nonfacts:z.boolean().default(false),kind:z.enum([...kinds,'preference_agreement']).optional()}).strict();
 export type MemoryRow = {id:string;source_id:string;body:string;source:string;source_url:string|null;kind:typeof kinds[number];occurred_at:string|null;recorded_at:string;active:number;supersedes:string|null;root_id:string;version:number;correction_reason:string|null};
 export class MemoryError extends Error { constructor(public code:string,public status:400|404|409=400){super(code);} }
 export function terms(text:string):string[]{
@@ -94,15 +94,23 @@ export async function saveMemory(db:D1Database,input:unknown,correction=false){
  try{await db.batch(stmts);}catch(err){const retry=await existing();if(retry)return retry;if(String(err).includes('stale_version')||String(err).includes('memories.supersedes'))throw new MemoryError('stale_version',409);throw err;}
  return {...evidence(row),deduplicated:false};
 }
+// List previews carry only stored display metadata, never all source quotations.
+async function withPreviewDetails<T extends {id:string}>(db:D1Database,rows:T[]) {
+ if(!rows.length)return [];
+ const result=await db.prepare(`SELECT memory_id,details FROM memory_details WHERE memory_id IN (${rows.map(()=>'?').join(',')})`).bind(...rows.map(r=>r.id)).all<{memory_id:string;details:string}>();
+ const details=new Map(result.results.map(r=>{const d=JSON.parse(r.details);return [r.memory_id,{title:d.title??null,summary:d.summary??null}] as const;}));
+ return rows.map(row=>({...row,details:details.get(row.id)??null}));
+}
 export async function listMemories(db:D1Database,options:{offset:number;limit:number;include_superseded:boolean;kind?:string}){
  await ensureMemoryDetails(db);
  const where=['1=1'];const args:(string|number)[]=[];
  if(!options.include_superseded)where.push('active=1 AND id NOT IN (SELECT memory_id FROM memory_reviews)');
- if(options.kind){where.push('kind=?');args.push(options.kind);}
+ if(options.kind==='preference_agreement')where.push("kind IN ('preference','agreement')");
+ else if(options.kind){where.push('kind=?');args.push(options.kind);}
  const clause=where.join(' AND ');
  const rows=await db.prepare(`SELECT * FROM memories WHERE ${clause} ORDER BY recorded_at DESC,id LIMIT ? OFFSET ?`).bind(...args,options.limit,options.offset).all<MemoryRow>();
  const count=await db.prepare(`SELECT COUNT(*) AS count FROM memories WHERE ${clause}`).bind(...args).first<{count:number}>();
- return {items:rows.results.map(evidence),total:count?.count??0,offset:options.offset};
+ return {items:await withPreviewDetails(db,rows.results.map(evidence)),total:count?.count??0,offset:options.offset};
 }
 async function embedding(env:Env,text:string,timeout=6000):Promise<number[]>{
  const url=new URL(env.EMBEDDING_URL!);if(url.protocol!=='https:')throw new Error('embedding_requires_https');
@@ -119,7 +127,8 @@ export async function searchMemory(env:Env,input:unknown){
  const clauses=['1=1'];const values:string[]=[];
  if(!args.include_superseded)clauses.push('m.active=1 AND m.id NOT IN (SELECT memory_id FROM memory_reviews)');
  if(!args.include_nonfacts)clauses.push("m.kind NOT IN ('dream','reflection')");
- if(args.kind){clauses.push('m.kind=?');values.push(args.kind);}
+ if(args.kind==='preference_agreement')clauses.push("m.kind IN ('preference','agreement')");
+ else if(args.kind){clauses.push('m.kind=?');values.push(args.kind);}
  const where=clauses.join(' AND ');
  const candidates=qt.length?(await env.DB.prepare(`SELECT m.*,COUNT(*) AS overlaps FROM memories m JOIN memory_terms t ON m.id=t.memory_id WHERE ${where} AND t.term IN (${qt.map(()=>'?').join(',')}) GROUP BY m.id HAVING COUNT(*)>=? ORDER BY overlaps DESC,m.recorded_at DESC LIMIT 100`).bind(...values,...qt,Math.max(1,Math.ceil(qt.length*.18))).all<MemoryRow>()).results:[];
  const rows=new Map(candidates.map(r=>[r.id,r]));const vectors=new Map<string,number>();let mode='lexical';
@@ -142,5 +151,5 @@ export async function searchMemory(env:Env,input:unknown){
   }catch{vectors.clear();rows.clear();for(const r of candidates)rows.set(r.id,r);warnings.push('向量服务不可用，已降级为关键词检索；不代表不存在相关记忆。');}
  }
  const hits=[...rows.values()].map(r=>{const rt=new Set(terms(r.body+' '+r.source));const matched_terms=qt.filter(t=>rt.has(t));const lexical=matched_terms.length/Math.max(1,qt.length);const semantic=vectors.get(r.id)??0;return {...evidence(r),matched_terms,score:Math.round(Math.max(lexical,semantic)*10000)/10000,reason:semantic>lexical?'semantic_similarity':'lexical_overlap'};}).sort((a,b)=>b.score-a.score||b.recorded_at.localeCompare(a.recorded_at)).slice(0,args.limit);
- return {query:args.query,status:hits.length?'matched':'no_match',message:hits.length?`找到 ${hits.length} 条相关记录`:'无匹配记忆',mode,warnings,hits,filters:{include_superseded:args.include_superseded,include_nonfacts:args.include_nonfacts},content_is_untrusted:true};
+ return {query:args.query,status:hits.length?'matched':'no_match',message:hits.length?`找到 ${hits.length} 条相关记录`:'无匹配记忆',mode,warnings,hits:await withPreviewDetails(env.DB,hits),filters:{include_superseded:args.include_superseded,include_nonfacts:args.include_nonfacts},content_is_untrusted:true};
 }

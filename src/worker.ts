@@ -53,7 +53,7 @@ app.use('/api/*',async(c,next)=>{
 });
 app.get('/api/session',c=>c.json({username:c.get('user').username,mcp_url:c.env.APP_ORIGIN+'/mcp',embedding_enabled:Boolean(c.env.EMBEDDING_URL&&c.env.EMBEDDING_MODEL)}));
 app.get('/api/memories',async c=>{
- const q=c.req.query();const options=z.object({offset:z.coerce.number().int().min(0).max(1000000).default(0),limit:z.coerce.number().int().min(1).max(100).default(40),include_superseded:z.enum(['true','false']).default('false'),kind:z.enum(kinds).optional()}).parse(q);
+ const q=c.req.query();const options=z.object({offset:z.coerce.number().int().min(0).max(1000000).default(0),limit:z.coerce.number().int().min(1).max(100).default(40),include_superseded:z.enum(['true','false']).default('false'),kind:z.enum([...kinds,'preference_agreement']).optional()}).parse(q);
  return c.json(await listMemories(c.env.DB,{...options,include_superseded:options.include_superseded==='true'}));
 });
 app.post('/api/memories',async c=>c.json(await saveMemory(c.env.DB,await c.req.json()),201));
