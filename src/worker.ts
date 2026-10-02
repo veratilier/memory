@@ -7,7 +7,7 @@ import {currentUser,login,serviceAuth,SCOPES,COOKIE,type User} from './auth';
 import {assertSameOrigin,getCookie,sessionCookie,sha256,hashPassword,verifyPassword,createCsrfToken,verifyCsrfToken} from './security';
 import {loginPage,consentPage} from './html';
 import {McpApiHandler,handleMcp} from './mcp';
-import {saveMemory,searchMemory,getMemory,listMemories,kinds,MemoryError} from './memory';
+import {saveMemory,searchMemory,getMemory,listMemories,kinds,MemoryError,withdrawMemory} from './memory';
 const app=new Hono<{Bindings:Env;Variables:{user:User}}>();
 app.use('*',bodyLimit({maxSize:65536,onError:c=>c.json({error:'request_too_large'},413)}));
 const safeReturn=(s:string|undefined)=>s?.startsWith('/')&&!s.startsWith('//')&&!/[\\\r\n]/.test(s)?s:'/';
@@ -59,6 +59,7 @@ app.get('/api/memories',async c=>{
 app.post('/api/memories',async c=>c.json(await saveMemory(c.env.DB,await c.req.json()),201));
 app.post('/api/search',async c=>c.json(await searchMemory(c.env,await c.req.json())));
 app.get('/api/memories/:id',async c=>c.json(await getMemory(c.env.DB,z.uuid().parse(c.req.param('id')))));
+app.post('/api/memories/:id/withdraw',async c=>c.json(await withdrawMemory(c.env.DB,c.req.param('id'),z.object({reason:z.string()}).parse(await c.req.json()).reason)));
 app.post('/api/memories/:id/correct',async c=>c.json(await saveMemory(c.env.DB,{...await c.req.json(),id:c.req.param('id')},true),201));
 app.get('/api/connections',async c=>{
  const user=c.get('user');const grants=await c.env.OAUTH_PROVIDER.listUserGrants(user.id);

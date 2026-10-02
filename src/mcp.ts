@@ -4,7 +4,7 @@ import {WorkerEntrypoint} from 'cloudflare:workers';
 import * as z from 'zod/v4';
 import type {Env,AuthProps} from './env';
 import {userById} from './auth';
-import {saveSchema,correctSchema,searchSchema,saveMemory,searchMemory,getMemory,MemoryError} from './memory';
+import {saveSchema,correctSchema,searchSchema,saveMemory,searchMemory,getMemory,MemoryError,withdrawMemory} from './memory';
 export async function handleMcp(request:Request,env:Env,props:AuthProps):Promise<Response>{
  const user=await userById(env,props.userId);
  if(!user||props.authVersion!==user.auth_version)return Response.json({error:'unauthorized'},{status:401});
@@ -21,6 +21,7 @@ export async function handleMcp(request:Request,env:Env,props:AuthProps):Promise
  register('memory_search','Search shared memories before referring to past events. Returns exact original text, source, time, matched terms and version. Default excludes superseded versions, dreams and reflections; no match is explicit. Does not call a chat generation model.',searchSchema,'memory:read',a=>searchMemory(env,a));
  register('memory_get','Retrieve exact original text by ID, including superseded versions, source and full version links. Never silently substitute the current version.',z.object({id:z.uuid()}).strict(),'memory:read',a=>getMemory(env.DB,a.id));
  register('memory_correct','Correct the current version by ID; requires complete corrected original text, source and reason. Retains the old original and rejects stale IDs. Retry with the same source_id.',correctSchema,'memory:write',a=>saveMemory(env.DB,a,true));
+ register('memory_withdraw','Withdraw a current record with a reason, preserving its original and history; it will no longer be recalled as current.',z.object({id:z.uuid(),reason:z.string().min(1).max(500)}).strict(),'memory:write',a=>withdrawMemory(env.DB,a.id,a.reason));
  const transport=new WebStandardStreamableHTTPServerTransport({enableJsonResponse:true});
  await server.connect(transport);
  try{return await transport.handleRequest(request,{authInfo:{token:'validated',clientId:props.clientId,scopes:props.scopes}});}finally{await server.close();}
