@@ -14,7 +14,7 @@ const badge=r=>`<span class="badge ${['dream','reflection'].includes(r.kind)?'su
 function markSelection(){document.querySelectorAll('.memory-row').forEach(el=>{const on=el.dataset.id===selectedId;el.classList.toggle('selected',on);el.setAttribute('aria-pressed',String(on));});}
 function clearDetail(){detailSequence++;selectedId=null;currentRecord=null;$('#detail-content').innerHTML='<div class="empty"><h2>选择一段旧事，慢慢读。</h2><p>原文、来源和每一次修订，都留在这里。</p></div>';if($('#detail').open)$('#detail').close();}
 function placeDetail(open=false){const content=$('#detail-content');if(mobile.matches){$('#detail-mobile-slot').append(content);if(open&&!$('#detail').open)$('#detail').showModal();}else{if($('#detail').open)$('#detail').close();$('#detail-pane').append(content);}}
-mobile.addEventListener('change',()=>placeDetail(!!selectedId));
+mobile.addEventListener('change',()=>placeDetail(false));
 async function load(){const sequence=++listSequence;$('#status').classList.remove('error');$('#status').textContent='正在读取…';$('#memories').setAttribute('aria-busy','true');try{
  const query=$('#query').value.trim(),old=$('#versions').checked;
  const params=new URLSearchParams({offset:String(offset),limit:'40',include_superseded:String(old),kind});
