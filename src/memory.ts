@@ -1,12 +1,16 @@
 import * as z from 'zod/v4';
-import type { Env } from './env';
-// Shared owner memory engine; additions preserve originals and version chains.
+import type { D1Database, D1PreparedStatement } from '@cloudflare/workers-types';
+import { embed, ensureVectorIndex, vectorConfig, type VectorEnv } from './memory-vector-index';
+export type Env = VectorEnv;
+// Shared schema/engine from veratilier/memory; never run Vesper schema migrations on this binding.
 async function sha256(text: string): Promise<string> {
  const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
  return Array.from(new Uint8Array(hash), b => b.toString(16).padStart(2, '0')).join('');
 }
 export const kinds = ['episode','preference','agreement','reflection','dream'] as const;
 export const detailSchema = z.object({
+ participants:z.array(z.string().trim().min(1).max(100)).max(12).optional(),
+ interpretation:z.string().trim().max(500).optional(),
  title:z.string().trim().max(100).optional(), summary:z.string().trim().max(500).optional(),
  evidence:z.array(z.object({conversation_id:z.string().min(1).max(200),message_id:z.string().min(1).max(200),quote:z.string().min(1).max(4000),created_at:z.iso.datetime({offset:true}).nullable().optional()}).strict()).max(12).optional(),
 }).strict();
@@ -69,7 +73,7 @@ export async function getMemory(db:D1Database,id:string){
  const review=await db.prepare('SELECT reason,requested_at FROM memory_reviews WHERE memory_id=?').bind(id).first();
  return {...evidence(row),review,details:details?JSON.parse(details.details):null,withdrawal,versions};
 }
-export async function saveMemory(db:D1Database,input:unknown,correction=false){
+export async function saveMemory(db:D1Database,input:unknown,correction=false,afterSave?:(id:string)=>D1PreparedStatement[]){
  await ensureMemoryDetails(db);
  const parsed=correction?correctSchema.parse(input):saveSchema.parse(input);
  const c=correction?correctSchema.parse(input):null;
@@ -91,6 +95,7 @@ export async function saveMemory(db:D1Database,input:unknown,correction=false){
  if(parsed.details)stmts.push(db.prepare('INSERT INTO memory_details VALUES (?,?)').bind(id,JSON.stringify(parsed.details)));
  // json_each keeps the index update in one statement regardless of original length.
  stmts.push(db.prepare('INSERT INTO memory_terms (memory_id,term) SELECT ?,value FROM json_each(?)').bind(id,JSON.stringify(terms(row.body+' '+row.source))));
+ if(afterSave)stmts.push(...afterSave(id));
  try{await db.batch(stmts);}catch(err){const retry=await existing();if(retry)return retry;if(String(err).includes('stale_version')||String(err).includes('memories.supersedes'))throw new MemoryError('stale_version',409);throw err;}
  return {...evidence(row),deduplicated:false};
 }
@@ -112,14 +117,6 @@ export async function listMemories(db:D1Database,options:{offset:number;limit:nu
  const count=await db.prepare(`SELECT COUNT(*) AS count FROM memories WHERE ${clause}`).bind(...args).first<{count:number}>();
  return {items:await withPreviewDetails(db,rows.results.map(evidence)),total:count?.count??0,offset:options.offset};
 }
-async function embedding(env:Env,text:string,timeout=6000):Promise<number[]>{
- const url=new URL(env.EMBEDDING_URL!);if(url.protocol!=='https:')throw new Error('embedding_requires_https');
- const response=await fetch(url,{method:'POST',headers:{'content-type':'application/json',...(env.EMBEDDING_API_KEY?{authorization:'Bearer '+env.EMBEDDING_API_KEY}:{})},body:JSON.stringify({model:env.EMBEDDING_MODEL,input:text}),signal:AbortSignal.timeout(timeout),redirect:'error'});
- if(!response.ok)throw new Error('embedding_unavailable');
- const data=(await response.json() as {data?:{embedding:number[]}[]});const v=data.data?.[0]?.embedding;
- if(!Array.isArray(v)||v.length>8192||!v.length||!v.every(x=>typeof x==='number'&&Number.isFinite(x)))throw new Error('invalid_embedding');
- return v;
-}
 export async function searchMemory(env:Env,input:unknown){
  await ensureMemoryDetails(env.DB);
  const args=searchSchema.parse(input);const qt=terms(args.query).slice(0,80);const warnings:string[]=[];
@@ -132,24 +129,19 @@ export async function searchMemory(env:Env,input:unknown){
  const where=clauses.join(' AND ');
  const candidates=qt.length?(await env.DB.prepare(`SELECT m.*,COUNT(*) AS overlaps FROM memories m JOIN memory_terms t ON m.id=t.memory_id WHERE ${where} AND t.term IN (${qt.map(()=>'?').join(',')}) GROUP BY m.id HAVING COUNT(*)>=? ORDER BY overlaps DESC,m.recorded_at DESC LIMIT 100`).bind(...values,...qt,Math.max(1,Math.ceil(qt.length*.18))).all<MemoryRow>()).results:[];
  const rows=new Map(candidates.map(r=>[r.id,r]));const vectors=new Map<string,number>();let mode='lexical';
- if(env.EMBEDDING_MODEL&&env.EMBEDDING_URL){
+ if(env.EMBEDDING_ENABLED==='true'){
   try{
-   const modelKey=env.EMBEDDING_URL+'#'+env.EMBEDDING_MODEL;const deadline=Date.now()+10000;
-   const recent=await env.DB.prepare(`SELECT m.*,e.vector AS cached_vector FROM memories m LEFT JOIN embeddings e ON e.memory_id=m.id AND e.model=? WHERE ${where} ORDER BY m.recorded_at DESC LIMIT 201`).bind(modelKey,...values).all<MemoryRow & {cached_vector:string|null}>();
-   if(recent.results.length>200)warnings.push('语义增强仅覆盖最近200条；关键词检索覆盖全部记录。');
-   const qv=await embedding(env,args.query);
-   // Keep a bounded subrequest budget. Cache misses are filled in groups of 12.
-   let generated=0;
-   for(const {cached_vector,...r} of recent.results.slice(0,200)){
-    const cached=cached_vector;
-    if(Date.now()>=deadline)throw new Error('embedding_timeout');
-    if(!cached&&generated>=12){if(!warnings.includes('向量缓存尚未完成，本轮只补充12条；关键词仍完整可用。'))warnings.push('向量缓存尚未完成，本轮只补充12条；关键词仍完整可用。');continue;}
-    const v=cached?JSON.parse(cached):await embedding(env,r.body,Math.max(1,Math.min(6000,deadline-Date.now())));if(!cached){generated++;await env.DB.prepare('INSERT OR REPLACE INTO embeddings VALUES (?,?,?)').bind(r.id,modelKey,JSON.stringify(v)).run();}
-    const score=cosine(qv,v);if(score>=.65){vectors.set(r.id,score);rows.set(r.id,r);}
+   const config=vectorConfig(env)!;await ensureVectorIndex(env.DB);
+   const indexed=await env.DB.prepare(`SELECT m.*,v.vector FROM memories m JOIN memory_vectors v ON v.memory_id=m.id AND v.index_key=? WHERE ${where}`).bind(config.key,...values).all<MemoryRow & {vector:string}>();
+   const missing=await env.DB.prepare(`SELECT COUNT(*) AS n FROM memories m WHERE ${where} AND NOT EXISTS (SELECT 1 FROM memory_vectors v WHERE v.memory_id=m.id AND v.index_key=?)`).bind(...values,config.key).first<{n:number}>();
+   if(missing?.n)warnings.push('vector_index_incomplete');
+   if(indexed.results.length){
+    const qv=await embed(env,args.query);
+    for(const {vector,...row} of indexed.results){const score=cosine(qv,JSON.parse(vector));if(score>=.65){vectors.set(row.id,score);rows.set(row.id,row);}}
    }
    mode='hybrid';
-  }catch{vectors.clear();rows.clear();for(const r of candidates)rows.set(r.id,r);warnings.push('向量服务不可用，已降级为关键词检索；不代表不存在相关记忆。');}
+  }catch{vectors.clear();rows.clear();for(const r of candidates)rows.set(r.id,r);warnings.push('embedding_unavailable_lexical_fallback');}
  }
- const hits=[...rows.values()].map(r=>{const rt=new Set(terms(r.body+' '+r.source));const matched_terms=qt.filter(t=>rt.has(t));const lexical=matched_terms.length/Math.max(1,qt.length);const semantic=vectors.get(r.id)??0;return {...evidence(r),matched_terms,score:Math.round(Math.max(lexical,semantic)*10000)/10000,reason:semantic>lexical?'semantic_similarity':'lexical_overlap'};}).sort((a,b)=>b.score-a.score||b.recorded_at.localeCompare(a.recorded_at)).slice(0,args.limit);
+ const hits=[...rows.values()].map(r=>{const rt=new Set(terms(r.body+' '+r.source));const matched_terms=qt.filter(t=>rt.has(t));const lexical=matched_terms.length/Math.max(1,qt.length);const semantic=vectors.get(r.id)??0;return {...evidence(r),matched_terms,lexical_score:lexical,semantic_score:semantic,score:Math.round(Math.max(lexical,semantic)*10000)/10000,reason:semantic>lexical?'semantic_similarity':'lexical_overlap'};}).sort((a,b)=>b.score-a.score||b.recorded_at.localeCompare(a.recorded_at)).slice(0,args.limit);
  return {query:args.query,status:hits.length?'matched':'no_match',message:hits.length?`找到 ${hits.length} 条相关记录`:'无匹配记忆',mode,warnings,hits:await withPreviewDetails(env.DB,hits),filters:{include_superseded:args.include_superseded,include_nonfacts:args.include_nonfacts},content_is_untrusted:true};
 }

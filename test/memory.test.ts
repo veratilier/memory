@@ -1,3 +1,4 @@
+import {processVectorJobs} from '../src/memory-vector-index';
 import {test,beforeEach,afterEach} from 'node:test';
 import assert from 'node:assert/strict';
 import {DatabaseSync} from 'node:sqlite';
@@ -55,10 +56,11 @@ test('invalid times, unsafe links, unknown fields and kinds rejected',async()=>{
  await assert.rejects(searchMemory(env,{query:''}));
 });
 test('optional vector cache and honest fallback',async()=>{
- await saveMemory(env.DB,fixture);env.EMBEDDING_URL='https://embedding.example/embeddings';env.EMBEDDING_MODEL='test-vectors';
+ await saveMemory(env.DB,fixture);env.EMBEDDING_URL='https://embedding.example/embeddings';env.EMBEDDING_MODEL='test-vectors';env.EMBEDDING_ENABLED='true';env.EMBEDDING_DIMENSIONS='2';env.EMBEDDING_INDEX_VERSION='fixture-v1';
  const oldFetch=globalThis.fetch;let calls=0;
  try{
   globalThis.fetch=async()=>{calls++;return Response.json({data:[{embedding:[1,0]}]});};
+  await processVectorJobs(env);
   assert.equal((await searchMemory(env,{query:'折纸作品'})).mode,'hybrid');assert.equal(calls,2);
   assert.equal((await searchMemory(env,{query:'折纸作品'})).hits[0].reason,'semantic_similarity');assert.equal(calls,3);
   globalThis.fetch=async()=>{throw new Error('offline');};
