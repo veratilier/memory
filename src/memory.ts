@@ -1,8 +1,17 @@
 import * as z from 'zod/v4';
 import type { Env } from './env';
-import { sha256 } from './security';
+// Shared owner memory engine; additions preserve originals and version chains.
+async function sha256(text: string): Promise<string> {
+ const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+ return Array.from(new Uint8Array(hash), b => b.toString(16).padStart(2, '0')).join('');
+}
 export const kinds = ['episode','preference','agreement','reflection','dream'] as const;
+export const detailSchema = z.object({
+ title:z.string().trim().max(100).optional(), summary:z.string().trim().max(500).optional(),
+ evidence:z.array(z.object({conversation_id:z.string().min(1).max(200),message_id:z.string().min(1).max(200),quote:z.string().min(1).max(4000),created_at:z.iso.datetime({offset:true}).nullable().optional()}).strict()).max(12).optional(),
+}).strict();
 export const saveSchema = z.object({
+ details:detailSchema.optional(),
  body:z.string().min(1).max(12000).refine(v=>Boolean(v.trim()),'原文不能为空'),
  source:z.string().min(1).max(500).refine(v=>Boolean(v.trim()),'来源不能为空'),
  source_id:z.string().min(1).max(300).optional(),
@@ -26,21 +35,50 @@ export function cosine(a:number[],b:number[]):number{
  return a.reduce((s,v,i)=>s+v*b[i],0)/norm;
 }
 export function evidence(row:MemoryRow){return {...row,epistemic_status:['dream','reflection'].includes(row.kind)?'subjective_not_fact':'recorded_claim_not_independently_verified',provenance:'user_supplied',content_is_untrusted:true};}
+const detailReady=new WeakMap<D1Database,Promise<unknown>>();
+export async function ensureMemoryDetails(db:D1Database){
+ if(!detailReady.has(db))detailReady.set(db,db.batch([
+ db.prepare('CREATE TABLE IF NOT EXISTS memory_details (memory_id TEXT PRIMARY KEY REFERENCES memories(id), details TEXT NOT NULL)'),
+ db.prepare('CREATE TABLE IF NOT EXISTS memory_reviews (memory_id TEXT PRIMARY KEY REFERENCES memories(id), reason TEXT NOT NULL, requested_at TEXT NOT NULL)'),
+ db.prepare('CREATE TABLE IF NOT EXISTS memory_withdrawals (memory_id TEXT PRIMARY KEY REFERENCES memories(id), reason TEXT NOT NULL, withdrawn_at TEXT NOT NULL)')
+ ]).catch(e=>{detailReady.delete(db);throw e;}));
+ await detailReady.get(db);
+}
+export async function requestMemoryReview(db:D1Database,id:string,reason:string){
+ await ensureMemoryDetails(db);await getMemory(db,id);
+ await db.prepare('INSERT OR REPLACE INTO memory_reviews VALUES (?,?,?)').bind(id,reason,new Date().toISOString()).run();
+}
+export async function withdrawMemory(db:D1Database,id:string,reason:string){
+ z.uuid().parse(id);z.string().trim().min(1).max(500).parse(reason);await ensureMemoryDetails(db);
+ const row=await getMemory(db,id);
+ if(row.withdrawal)return row;
+ if(!row.active)throw new MemoryError('stale_version',409);
+ await db.batch([
+ db.prepare('INSERT INTO memory_withdrawals SELECT id,?,? FROM memories WHERE id=? AND active=1 ON CONFLICT(memory_id) DO NOTHING').bind(reason,new Date().toISOString(),id),
+ db.prepare('UPDATE memories SET active=0 WHERE id=? AND EXISTS (SELECT 1 FROM memory_withdrawals WHERE memory_id=?)').bind(id,id)
+ ]);
+ const result=await getMemory(db,id);if(!result.withdrawal)throw new MemoryError('stale_version',409);return result;
+}
 export async function getMemory(db:D1Database,id:string){
+ await ensureMemoryDetails(db);
  const row=await db.prepare('SELECT * FROM memories WHERE id=?').bind(id).first<MemoryRow>();
  if(!row)throw new MemoryError('memory_not_found',404);
  const versions=(await db.prepare('SELECT id,version,active,supersedes,recorded_at,correction_reason FROM memories WHERE root_id=? ORDER BY version').bind(row.root_id).all()).results;
- return {...evidence(row),versions};
+ const details=await db.prepare('SELECT details FROM memory_details WHERE memory_id=?').bind(id).first<{details:string}>();
+ const withdrawal=await db.prepare('SELECT reason,withdrawn_at FROM memory_withdrawals WHERE memory_id=?').bind(id).first();
+ const review=await db.prepare('SELECT reason,requested_at FROM memory_reviews WHERE memory_id=?').bind(id).first();
+ return {...evidence(row),review,details:details?JSON.parse(details.details):null,withdrawal,versions};
 }
 export async function saveMemory(db:D1Database,input:unknown,correction=false){
+ await ensureMemoryDetails(db);
  const parsed=correction?correctSchema.parse(input):saveSchema.parse(input);
  const c=correction?correctSchema.parse(input):null;
  const occurred=parsed.occurred_at?new Date(parsed.occurred_at).toISOString():null;
  const identity={body:parsed.body,source:parsed.source,source_url:parsed.source_url??null,kind:parsed.kind,occurred_at:occurred,supersedes:c?.id??null,correction_reason:c?.correction_reason??null};
- const sourceId=parsed.source_id??'sha256:'+await sha256(JSON.stringify(identity));
+ const sourceId=parsed.source_id??'sha256:'+await sha256(JSON.stringify(parsed.details?{...identity,details:parsed.details}:identity));
  async function existing(){
   const row=await db.prepare('SELECT * FROM memories WHERE source_id=?').bind(sourceId).first<MemoryRow>();
-  if(row){if(Object.entries(identity).some(([key,value])=>row[key as keyof MemoryRow]!==value))throw new MemoryError('source_id_conflict',409);return {...evidence(row),deduplicated:true};}
+  if(row){if(Object.entries(identity).some(([key,value])=>row[key as keyof MemoryRow]!==value))throw new MemoryError('source_id_conflict',409);const details=await db.prepare('SELECT details FROM memory_details WHERE memory_id=?').bind(row.id).first<{details:string}>();if(JSON.stringify(parsed.details??null)!==(details?.details??'null'))throw new MemoryError('source_id_conflict',409);return {...evidence(row),deduplicated:true};}
   return null;
  }
  const prior=await existing();if(prior)return prior;
@@ -50,14 +88,16 @@ export async function saveMemory(db:D1Database,input:unknown,correction=false){
  const row:MemoryRow={id,source_id:sourceId,...identity,recorded_at:new Date().toISOString(),active:1,root_id:old?.root_id??id,version:(old?.version??0)+1};
  // One D1 batch transaction + DB triggers prevents races and split version chains.
  const stmts=[db.prepare('INSERT INTO memories (id,source_id,body,kind,source,source_url,occurred_at,recorded_at,active,supersedes,root_id,version,correction_reason) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)').bind(row.id,row.source_id,row.body,row.kind,row.source,row.source_url,row.occurred_at,row.recorded_at,1,row.supersedes,row.root_id,row.version,row.correction_reason)];
+ if(parsed.details)stmts.push(db.prepare('INSERT INTO memory_details VALUES (?,?)').bind(id,JSON.stringify(parsed.details)));
  // json_each keeps the index update in one statement regardless of original length.
  stmts.push(db.prepare('INSERT INTO memory_terms (memory_id,term) SELECT ?,value FROM json_each(?)').bind(id,JSON.stringify(terms(row.body+' '+row.source))));
  try{await db.batch(stmts);}catch(err){const retry=await existing();if(retry)return retry;if(String(err).includes('stale_version')||String(err).includes('memories.supersedes'))throw new MemoryError('stale_version',409);throw err;}
  return {...evidence(row),deduplicated:false};
 }
 export async function listMemories(db:D1Database,options:{offset:number;limit:number;include_superseded:boolean;kind?:string}){
+ await ensureMemoryDetails(db);
  const where=['1=1'];const args:(string|number)[]=[];
- if(!options.include_superseded)where.push('active=1');
+ if(!options.include_superseded)where.push('active=1 AND id NOT IN (SELECT memory_id FROM memory_reviews)');
  if(options.kind){where.push('kind=?');args.push(options.kind);}
  const clause=where.join(' AND ');
  const rows=await db.prepare(`SELECT * FROM memories WHERE ${clause} ORDER BY recorded_at DESC,id LIMIT ? OFFSET ?`).bind(...args,options.limit,options.offset).all<MemoryRow>();
@@ -68,15 +108,16 @@ async function embedding(env:Env,text:string,timeout=6000):Promise<number[]>{
  const url=new URL(env.EMBEDDING_URL!);if(url.protocol!=='https:')throw new Error('embedding_requires_https');
  const response=await fetch(url,{method:'POST',headers:{'content-type':'application/json',...(env.EMBEDDING_API_KEY?{authorization:'Bearer '+env.EMBEDDING_API_KEY}:{})},body:JSON.stringify({model:env.EMBEDDING_MODEL,input:text}),signal:AbortSignal.timeout(timeout),redirect:'error'});
  if(!response.ok)throw new Error('embedding_unavailable');
- const data=await response.json<{data?:{embedding:number[]}[]}>();const v=data.data?.[0]?.embedding;
+ const data=(await response.json() as {data?:{embedding:number[]}[]});const v=data.data?.[0]?.embedding;
  if(!Array.isArray(v)||v.length>8192||!v.length||!v.every(x=>typeof x==='number'&&Number.isFinite(x)))throw new Error('invalid_embedding');
  return v;
 }
 export async function searchMemory(env:Env,input:unknown){
+ await ensureMemoryDetails(env.DB);
  const args=searchSchema.parse(input);const qt=terms(args.query).slice(0,80);const warnings:string[]=[];
  if(terms(args.query).length>80)warnings.push('检索词超过80个，仅使用前80个。');
  const clauses=['1=1'];const values:string[]=[];
- if(!args.include_superseded)clauses.push('m.active=1');
+ if(!args.include_superseded)clauses.push('m.active=1 AND m.id NOT IN (SELECT memory_id FROM memory_reviews)');
  if(!args.include_nonfacts)clauses.push("m.kind NOT IN ('dream','reflection')");
  if(args.kind){clauses.push('m.kind=?');values.push(args.kind);}
  const where=clauses.join(' AND ');

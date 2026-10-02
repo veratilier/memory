@@ -77,3 +77,17 @@ test('login sessions revoked by password version; rate limit and CSRF are enforc
  assert.equal(assertSameOrigin(new Request('https://memory.example',{headers:{origin:'https://evil.example'}}),'https://memory.example'),false);
  assert.equal(await serviceAuth(new Request('https://memory.example',{headers:{authorization:'Bearer mem_invalid'}}),env),null);
 });
+
+test('metadata and withdrawals retain originals; review waits for a new corrected version',async()=>{
+ const {withdrawMemory,requestMemoryReview}=await import('../src/memory');
+ const original=await saveMemory(env.DB,{...fixture,details:{title:'fixture original',evidence:[{conversation_id:'fixture',message_id:'m1',quote:'原话'}]}});
+ assert.equal((await getMemory(env.DB,original.id)).details.title,'fixture original');
+ await requestMemoryReview(env.DB,original.id,'fixture changed');
+ assert.equal((await searchMemory(env,{query:'蓝色纸船'})).hits.length,0);
+ const corrected=await saveMemory(env.DB,{...fixture,id:original.id,kind:'preference',correction_reason:'fixture reclassification'},true);
+ assert.equal((await getMemory(env.DB,original.id)).body,fixture.body);
+ assert.equal((await searchMemory(env,{query:'蓝色纸船'})).hits[0].id,corrected.id);
+ await withdrawMemory(env.DB,corrected.id,'fixture withdraw');
+ assert.equal((await searchMemory(env,{query:'蓝色纸船'})).hits.length,0);
+ assert.equal((await getMemory(env.DB,corrected.id)).withdrawal?.reason,'fixture withdraw');
+});
